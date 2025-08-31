@@ -3,7 +3,7 @@ Core dependencies for dependency injection.
 """
 
 from functools import lru_cache
-
+import time
 from openai import AsyncOpenAI
 import google.generativeai as genai
 from app.core.config import get_settings
@@ -91,7 +91,6 @@ class RateLimiter:
         Returns:
             True if request is allowed, False otherwise
         """
-        import time
         
         current_time = time.time()
         
