@@ -3,7 +3,7 @@ Chat analysis services with AI agent orchestration.
 """
 
 import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
@@ -27,6 +27,15 @@ class EventDetectionResult(BaseModel):
     internal_note: Optional[str] = Field(default=None, description="Internal note about the event")
 
 
+class TriageDecision(BaseModel):
+    """Triage decision with multiple possible actions."""
+    
+    should_flag: bool = Field(description="Flag for human attention")
+    should_respond: bool = Field(description="Generate automated response")
+    should_ignore: bool = Field(description="No response needed")
+    reasoning: str = Field(description="Reasoning behind the decision")
+
+
 class TriageAgent:
     """Agent responsible for message triage decisions."""
 
@@ -36,15 +45,15 @@ class TriageAgent:
         self.temperature = 0
 
     @retry_with_backoff(max_retries=3, exceptions=(Exception,))
-    async def analyze(self, message: str) -> str:
+    async def analyze(self, message: str) -> TriageDecision:
         """
-        Analyze message and determine primary action.
+        Analyze message and determine triage actions.
 
         Args:
             message: The message content to analyze
 
         Returns:
-            Primary action: FLAG, IGNORE, or RESPOND
+            TriageDecision with multiple possible actions
         """
         try:
             with Timer("triage_analysis"):
@@ -56,28 +65,49 @@ class TriageAgent:
                             "role": "system",
                             "content": (
                                 "You are an expert at triaging client messages for a law firm. "
-                                "Your only job is to decide the primary action based on a strict priority: `FLAG` > `IGNORE` > `RESPOND`. "
-                                "Your output MUST be a JSON object conforming to the `TriageDecision` schema.\n"
-                                " - `FLAG`: For URGENT issues: legal/medical advice questions, extreme emotional distress, new injuries, threats to leave, or requests to speak to a person.\n"
-                                " - `IGNORE`: ONLY for simple conversation enders with NO new information (e.g., \"ok\", \"thanks\") where no input is needed.\n"
-                                " - `RESPOND`: For any other message needing a reply, including mild frustration or status updates.\n\n"
-                                "Return only a JSON object with the structure: {\"primary_action\": \"FLAG|IGNORE|RESPOND\"}"
+                                "Your job is to determine which actions to take based on the message content. "
+                                "Your output MUST be a JSON object conforming to the `TriageDecision` schema.\n\n"
+                                "Possible actions (can be combined according to rules):\n"
+                                " - `should_flag`: For messages requiring human attention. Set to true for URGENT issues: legal/medical advice questions, extreme emotional distress, new injuries, threats to leave, requests to speak to a person.\n"
+                                " - `should_respond`: For messages needing an automated response. Set to true for messages that can benefit from an immediate reply.\n"
+                                " - `should_ignore`: For messages requiring no response. Set to true ONLY for simple conversation enders with NO new information (e.g., \"ok\", \"thanks\").\n\n"
+                                "Rules for combining actions:\n"
+                                "1. `should_respond` and `should_ignore` CANNOT both be true (mutually exclusive)\n"
+                                "2. `should_flag` can be combined with either `should_respond` or `should_ignore`\n"
+                                "3. At least one action must be true\n\n"
+                                "Return a JSON object with the structure: {\n"
+                                "  \"should_flag\": boolean,\n"
+                                "  \"should_respond\": boolean,\n"
+                                "  \"should_ignore\": boolean,\n"
+                                "  \"reasoning\": \"string explanation\"\n"
+                                "}"
                             )
                         },
                         {
                             "role": "user",
-                            "content": f"Analyze the following message and determine the primary action: '{message}'"
+                            "content": f"Analyze the following message and determine which actions to take: '{message}'"
                         }
                     ]
                 )
 
-                result = json.loads(response.choices[0].message.content)
-                action = result.get("primary_action")
-
-                if action not in ["FLAG", "IGNORE", "RESPOND"]:
-                    raise ValidationError(f"Invalid triage action: {action}")
-
-                return action
+                result_json = json.loads(response.choices[0].message.content)
+                
+                # Create and validate the TriageDecision
+                result = TriageDecision(
+                    should_flag=result_json.get("should_flag", False),
+                    should_respond=result_json.get("should_respond", False),
+                    should_ignore=result_json.get("should_ignore", False),
+                    reasoning=result_json.get("reasoning", "No reasoning provided")
+                )
+                
+                # Validate business rules
+                if result.should_respond and result.should_ignore:
+                    raise ValidationError("RESPOND and IGNORE cannot both be true")
+                
+                if not (result.should_flag or result.should_respond or result.should_ignore):
+                    raise ValidationError("At least one action must be true")
+                
+                return result
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse triage response: {e}")
@@ -96,19 +126,30 @@ class RiskAgent:
         self.temperature = 0
 
     @retry_with_backoff(max_retries=3, exceptions=(Exception,))
-    async def analyze(self, message: str, primary_action: str) -> Dict[str, Any]:
+    async def analyze(self, message: str, triage_decision: TriageDecision) -> Dict[str, Any]:
         """
         Analyze message for client retention risk.
 
         Args:
             message: The message content to analyze
-            primary_action: The primary action from triage
+            triage_decision: The triage decision with actions
 
         Returns:
             Dictionary with risk_update and risk_score
         """
         try:
             with Timer("risk_analysis"):
+                # Convert triage decision to a string for the prompt
+                triage_actions = []
+                if triage_decision.should_flag:
+                    triage_actions.append("FLAG")
+                if triage_decision.should_respond:
+                    triage_actions.append("RESPOND")
+                if triage_decision.should_ignore:
+                    triage_actions.append("IGNORE")
+                
+                triage_info = ", ".join(triage_actions)
+                
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     temperature=self.temperature,
@@ -131,7 +172,7 @@ class RiskAgent:
                         {
                             "role": "user",
                             "content": (
-                                f"Given the message '{message}' and that the triage action was '{primary_action}', "
+                                f"Given the message '{message}' and that the triage actions were '{triage_info}', "
                                 "what is the risk level and score?"
                             )
                         }
@@ -308,7 +349,7 @@ class ResponseGenerator:
     async def generate(
         self,
         conversation_history: List[Dict[str, Any]],
-        primary_action: str,
+        triage_decision: TriageDecision,
         risk_update: str,
         sentiment: str = "Neutral",
         sentiment_score: int = 50
@@ -318,7 +359,7 @@ class ResponseGenerator:
 
         Args:
             conversation_history: List of conversation messages
-            primary_action: The primary action from triage
+            triage_decision: The triage decision with actions
             risk_update: The risk level assessment
             sentiment: Client's sentiment (Positive, Neutral, Negative)
             sentiment_score: Sentiment intensity score (0-100)
@@ -326,11 +367,12 @@ class ResponseGenerator:
         Returns:
             Generated response or None if no response needed
         """
-        # Skip response for high-risk flagged messages or ignore actions
-        if (primary_action == "FLAG" and risk_update == "High") or primary_action == "IGNORE":
+        # Skip response if we should ignore or if it's a high-risk flag without respond
+        if triage_decision.should_ignore or (triage_decision.should_flag and not triage_decision.should_respond and risk_update == "High"):
             return None
 
-        if primary_action not in ["RESPOND", "FLAG"]:
+        # Only proceed if we should respond
+        if not triage_decision.should_respond:
             return None
 
         try:
@@ -338,6 +380,9 @@ class ResponseGenerator:
                 last_message = conversation_history[-1] if conversation_history else {}
                 last_message_content = last_message.get("content", "")
 
+                # Determine if this is a flagged message that also needs a response
+                is_flagged = triage_decision.should_flag
+                
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     temperature=self.temperature,
@@ -345,30 +390,31 @@ class ResponseGenerator:
                         {
                             "role": "system",
                             "content": (
-                                "You are a friendly, empathetic AI assistant for a law firm. Your only job is to write a short, human-sounding text message based on an action and the client's last message.\n\n"
+                                "You are a friendly, empathetic AI assistant for a law firm. Your only job is to write a short, human-sounding text message based on the triage decision and the client's last message.\n\n"
                                 "**Your top priority is to match the client's tone and sentiment to sound as human as possible.** Analyze their message and mirror their style, whether it's formal, casual, frustrated, or happy. Your response MUST be appropriate for the urgency and sentiment of the client's message.\n\n"
-                                "- If the action is \"RESPOND\":\n"
-                                "  - For POSITIVE sentiment: Respond with appropriate enthusiasm and warmth. Match their happiness with encouraging and supportive language.\n"
-                                "  - For NEGATIVE sentiment: Show empathy and understanding. Acknowledge their feelings first before offering help.\n"
-                                "  - For NEUTRAL sentiment: Maintain a professional but friendly tone. Be clear and direct.\n\n"
-                                "- If the action is \"FLAG\", you must escalate to a human:\n"
+                                f"This message {'IS' if is_flagged else 'is NOT'} flagged for human review.\n\n"
+                                "Response guidelines based on sentiment:\n"
+                                "- For POSITIVE sentiment: Respond with appropriate enthusiasm and warmth. Match their happiness with encouraging and supportive language.\n"
+                                "- For NEGATIVE sentiment: Show empathy and understanding. Acknowledge their feelings first before offering help.\n"
+                                "- For NEUTRAL sentiment: Maintain a professional but friendly tone. Be clear and direct.\n\n"
+                                f"If the message is flagged for human review ({is_flagged}):\n"
                                 "  1. First, **acknowledge the client's situation with empathy that matches the seriousness of their message.**\n"
                                 "  2. Then, explain that you are getting a team member to help immediately.\n"
                                 "  3. **Crucially, if the message is urgent or serious (e.g., involves medical distress), do NOT use casual phrases like \"That's a great question.\"** Your tone must match the seriousness of the situation.\n\n"
                                 "EXAMPLE RESPONSES FOR DIFFERENT SENTIMENTS:\n"
                                 "- Positive (excited client): \"That's fantastic news! I'm really happy to hear about your progress. We're all rooting for you!\"\n"
                                 "- Negative (frustrated client): \"I understand your frustration, and I'm truly sorry you're going through this. Let me help address this situation right away.\"\n"
-                                "- Urgent negative: \"I understand this is a difficult and urgent situation. I'm getting our team involved immediately to help you.\"\n\n"
+                                "- Urgent negative (flagged): \"I understand this is a difficult and urgent situation. I'm getting our team involved immediately to help you.\"\n\n"
                                 "Generate ONLY the response text. Do not include quotes or additional formatting."
                             )
                         },
                         {
                             "role": "user",
                             "content": (
-                                f"Action: **{primary_action}**\n"
+                                f"Triage decision: {triage_decision.reasoning}\n"
                                 f"Client's sentiment: **{sentiment}** (score: {sentiment_score}/100)\n"
                                 f"Client's last message: \"{last_message_content}\"\n\n"
-                                "Generate a response that precisely matches the client's emotional tone and the action required."
+                                "Generate a response that precisely matches the client's emotional tone and the appropriate actions."
                             )
                         }
                     ]
@@ -425,23 +471,33 @@ class ChatOrchestrator:
                 sentiment_task = self.sentiment_agent.analyze(current_message)
                 event_task = self.event_detection_agent.analyze(current_message)
 
-                primary_action, sentiment_result, event_detection = await asyncio.gather(
+                triage_decision, sentiment_result, event_detection = await asyncio.gather(
                     triage_task, sentiment_task, event_task
                 )
 
-                risk_result = await self.risk_agent.analyze(current_message, primary_action)
+                risk_result = await self.risk_agent.analyze(current_message, triage_decision)
 
                 # Pass sentiment information to response generator
                 response_to_send = await self.response_generator.generate(
                     conversation_history, 
-                    primary_action, 
+                    triage_decision, 
                     risk_result["risk_update"],
                     sentiment_result["sentiment"],
                     sentiment_result["sentiment_score"]
                 )
 
+                # Convert actions to a list for clearer output
+                actions = []
+                if triage_decision.should_flag:
+                    actions.append("FLAG")
+                if triage_decision.should_respond:
+                    actions.append("RESPOND")
+                if triage_decision.should_ignore:
+                    actions.append("IGNORE")
+
                 result = {
-                    "action": primary_action,
+                    "actions": actions,
+                    "triage_reasoning": triage_decision.reasoning,
                     "risk_update": risk_result["risk_update"],
                     "risk_score": risk_result["risk_score"],
                     "sentiment": sentiment_result["sentiment"],
@@ -449,7 +505,9 @@ class ChatOrchestrator:
                     "response_to_send": response_to_send,
                     "event_detection": event_detection,
                     "full_analysis": {
-                        "primary_action": primary_action,
+                        "should_flag": triage_decision.should_flag,
+                        "should_respond": triage_decision.should_respond,
+                        "should_ignore": triage_decision.should_ignore,
                         "risk_update": risk_result["risk_update"],
                         "sentiment": sentiment_result["sentiment"],
                         "event_detection": event_detection
@@ -460,7 +518,7 @@ class ChatOrchestrator:
                     "Message analysis completed",
                     extra={
                         "client_id": client_info.get("client_id", "unknown"),
-                        "action": primary_action,
+                        "actions": ", ".join(actions),
                         "risk": risk_result["risk_update"],
                         "sentiment": sentiment_result["sentiment"],
                         "has_event": event_detection.get("has_event", False)
@@ -473,7 +531,8 @@ class ChatOrchestrator:
             logger.error(f"Message analysis failed: {e}")
             # Return safe default on error
             return {
-                "action": "FLAG",
+                "actions": ["FLAG"],
+                "triage_reasoning": f"Error during analysis: {str(e)}",
                 "risk_update": "High",
                 "risk_score": 100,
                 "sentiment": "Neutral",
@@ -481,6 +540,9 @@ class ChatOrchestrator:
                 "response_to_send": None,
                 "event_detection": {"has_event": False},
                 "full_analysis": {
+                    "should_flag": True,
+                    "should_respond": False,
+                    "should_ignore": False,
                     "error": str(e)
                 }
             }
