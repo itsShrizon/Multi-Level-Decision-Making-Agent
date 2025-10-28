@@ -60,43 +60,8 @@ apply-job-agent-backend/
 - Redis (optional, for caching)
 - PostgreSQL (optional, for data persistence)
 
-### Installation
 
-1. **Clone and setup the project:**
-```bash
-cd apply-job-agent-backend
-cp .env.example .env
-```
 
-2. **Configure environment variables:**
-Edit `.env` file with your settings:
-```env
-OPENAI_API_KEY=your-openai-api-key-here
-ENVIRONMENT=development
-DEBUG=true
-```
-
-3. **Install dependencies:**
-```bash
-pip install -r requirements.txt
-```
-
-4. **Run the application:**
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Using Docker
-
-1. **Build and run with Docker Compose:**
-```bash
-docker-compose up --build
-```
-
-2. **Access the API:**
-- API: http://localhost:8000
-- Documentation: http://localhost:8000/api/docs
-- Flower (Celery monitoring): http://localhost:5555
 
 ## API Endpoints
 
