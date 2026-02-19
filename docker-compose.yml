@@ -11,6 +11,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://chatbot:password123@postgres:5432/chatbot_db
       - REDIS_URL=redis://redis:6379
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       - postgres
       - redis
