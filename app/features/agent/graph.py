@@ -10,28 +10,28 @@ from langchain_core.tools import Tool
 
 settings = get_settings()
 
-# Initialize the model
+# spin up the brain
 model = ChatOpenAI(
     model=settings.OPENAI_MODEL_GPT4,
     api_key=settings.OPENAI_API_KEY,
     temperature=0
 )
 
-# Bind tools to the model
+# give it the tools
 model_with_tools = model.bind_tools(agent_tools)
 
-# Define the agent node
+# the thinking part
 def agent(state: AgentState):
     messages = state["messages"]
     response = model_with_tools.invoke(messages)
     return {"messages": [response]}
 
-# Define the tools node manually
+# the doing part (manual cuz version mismatch sucks)
 async def tools(state: AgentState):
     messages = state["messages"]
     last_message = messages[-1]
     
-    # We construct a ToolNode replacement
+    # lookup table for tools
     tool_map = {tool.name: tool for tool in agent_tools}
     
     responses = []
@@ -41,9 +41,9 @@ async def tools(state: AgentState):
         
         if tool_name in tool_map:
             tool = tool_map[tool_name]
-            # Execute tool
+            # execute or die trying
             try:
-                # Tools are async
+                # async power
                 tool_output = await tool.ainvoke(tool_args)
             except Exception as e:
                 tool_output = f"Error executing tool {tool_name}: {str(e)}"
@@ -58,17 +58,16 @@ async def tools(state: AgentState):
     
     return {"messages": responses}
 
-# Define the function to determine the next node
+# decider: keep going or shut up?
 def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
     messages = state["messages"]
     last_message = messages[-1]
-    # If the LLM makes a tool call, then we route to the "tools" node
+    # tool calls? go to tools. otherwise bail.
     if last_message.tool_calls:
         return "tools"
-    # Otherwise, we stop (reply to the user)
     return "__end__"
 
-# Define the graph
+# build the maze
 workflow = StateGraph(AgentState)
 
 workflow.add_node("agent", agent)
@@ -83,5 +82,5 @@ workflow.add_conditional_edges(
 
 workflow.add_edge("tools", "agent")
 
-# Compile the graph
+# compile it
 app = workflow.compile()
