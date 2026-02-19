@@ -25,6 +25,7 @@ from app.core.exceptions import (
 from app.features.chat import router as chat_router
 from app.features.insights import router as insights_router
 from app.features.outbound import router as outbound_router
+from app.features.agent import router as agent_router
 from app.shared.middleware import (
     request_logging_middleware,
     rate_limiting_middleware,
@@ -109,6 +110,11 @@ def create_application() -> FastAPI:
         outbound_router,
         prefix="/api/v1/outbound",
         tags=["Outbound Messages"]
+    )
+    app.include_router(
+        agent_router,
+        prefix="/api/v1/agent",
+        tags=["Agent"]
     )
     
     @app.get("/", tags=["Health"])
