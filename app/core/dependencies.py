@@ -1,127 +1,60 @@
-"""
-Core dependencies for dependency injection.
+"""Lightweight DI helpers. Most LM access now goes through app.core.llm.
+
+Legacy shims for the in-flight refactor. The OpenAI/Gemini direct
+clients will go away once chat/insights/outbound have been ported
+to DSPy modules.
 """
 
+from __future__ import annotations
+
+import time
 from functools import lru_cache
 
-from openai import AsyncOpenAI
 import google.generativeai as genai
+from openai import AsyncOpenAI
+
 from app.core.config import get_settings
-from app.core.exceptions import ConfigurationError
-from app.core.logging import get_logger
-
-settings = get_settings()
-logger = get_logger(__name__)
 
 
-@lru_cache()
+@lru_cache
 def get_openai_client() -> AsyncOpenAI:
-    """
-    Get cached OpenAI client instance.
-    
-    Returns:
-        Configured AsyncOpenAI client
-        
-    Raises:
-        ConfigurationError: If OpenAI API key is not configured
-    """
-    if not settings.OPENAI_API_KEY:
-        raise ConfigurationError(
-            "OpenAI API key not configured",
-            error_code="OPENAI_API_KEY_MISSING"
-        )
-    
-    return AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        timeout=30.0,
-        max_retries=3,
-    )
+    """Legacy: direct OpenAI client. Prefer app.core.llm.get_lm()."""
+    settings = get_settings()
+    return AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=30.0, max_retries=3)
 
 
-@lru_cache()
+@lru_cache
 def get_gemini_client():
-    """
-    Get cached Gemini client instance.
-    
-    Returns:
-        Configured Gemini GenerativeModel
-        
-    Raises:
-        ConfigurationError: If Gemini API key is not configured
-    """
+    """Legacy: raw Gemini model. Prefer app.core.llm.get_lm('report')."""
+    settings = get_settings()
     if not settings.GEMINI_API_KEY:
-        raise ConfigurationError(
-            "Gemini API key not configured",
-            error_code="GEMINI_API_KEY_MISSING"
-        )
-    
-    # Configure the Gemini client
+        raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=settings.GEMINI_API_KEY)
-    
-    # Create and return the model
-    model = genai.GenerativeModel(
-        model_name=settings.GEMINI_MODEL,
-        generation_config={
-            "temperature": settings.GEMINI_TEMPERATURE,
-            "max_output_tokens": settings.GEMINI_MAX_TOKENS,
-        }
+    model_name = settings.LM_REPORT.removeprefix("gemini/")
+    return genai.GenerativeModel(
+        model_name=model_name,
+        generation_config={"temperature": 0.3, "max_output_tokens": 4000},
     )
-    
-    return model
 
 
+# in-memory rate limiter — placeholder until slowapi lands in sprint 5
 class RateLimiter:
-    """
-    Simple in-memory rate limiter.
-    In production, this should use Redis for distributed rate limiting.
-    """
-    
-    def __init__(self):
-        self._requests = {}
-    
+    def __init__(self) -> None:
+        self._hits: dict[str, list[float]] = {}
+
     def is_allowed(self, key: str, limit: int = 100, window: int = 60) -> bool:
-        """
-        Check if request is allowed based on rate limiting.
-        
-        Args:
-            key: Unique identifier (e.g., IP address, user ID)
-            limit: Maximum requests allowed
-            window: Time window in seconds
-            
-        Returns:
-            True if request is allowed, False otherwise
-        """
-        import time
-        
-        current_time = time.time()
-        
-        if key not in self._requests:
-            self._requests[key] = []
-        
-        # Remove old requests outside the window
-        self._requests[key] = [
-            req_time for req_time in self._requests[key]
-            if current_time - req_time < window
-        ]
-        
-        # Check if limit is exceeded
-        if len(self._requests[key]) >= limit:
+        now = time.time()
+        bucket = [t for t in self._hits.get(key, []) if now - t < window]
+        if len(bucket) >= limit:
+            self._hits[key] = bucket
             return False
-        
-        # Add current request
-        self._requests[key].append(current_time)
+        bucket.append(now)
+        self._hits[key] = bucket
         return True
 
 
-# Global rate limiter instance
-rate_limiter = RateLimiter()
+_rate_limiter = RateLimiter()
 
 
 def get_rate_limiter() -> RateLimiter:
-    """Get rate limiter instance."""
-    return rate_limiter
-
-
-def get_gemini_model():
-    """Get Gemini model instance."""
-    return get_gemini_client()
+    return _rate_limiter
