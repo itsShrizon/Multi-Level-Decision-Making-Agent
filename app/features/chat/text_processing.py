@@ -1,182 +1,80 @@
-"""
-Text processing services for making content concise.
-"""
+"""Light text utilities: concise rewrite, keyword pull, urgency tag."""
 
-from app.core.config import get_settings
-from app.core.dependencies import get_openai_client
-from app.core.exceptions import OpenAIError, ValidationError
+from __future__ import annotations
+
+import asyncio
+from typing import Literal
+
+import dspy
+
+from app.core.llm import get_lm
 from app.core.logging import get_logger
-from app.shared.utils import retry_with_backoff, Timer
 
-settings = get_settings()
 logger = get_logger(__name__)
 
 
+class _Concise(dspy.Signature):
+    """Rewrite text concisely while keeping meaning. Cap at 4 words."""
+
+    text: str = dspy.InputField()
+    concise: str = dspy.OutputField()
+
+
+class _Keywords(dspy.Signature):
+    """Extract up to N key terms or phrases as a comma-separated list."""
+
+    text: str = dspy.InputField()
+    max_keywords: int = dspy.InputField()
+    keywords: str = dspy.OutputField(desc="Comma-separated, no extra commentary")
+
+
+class _Urgency(dspy.Signature):
+    """Classify message urgency. Consider intensity, time pressure, emotion."""
+
+    text: str = dspy.InputField()
+    urgency: Literal["Low", "Medium", "High"] = dspy.OutputField()
+
+
 class TextProcessor:
-    """Service for processing and optimizing text content."""
-    
-    def __init__(self):
-        self.client = get_openai_client()
-        self.model = settings.OPENAI_MODEL_GPT4
-        self.temperature = 0.0
-    
-    @retry_with_backoff(max_retries=3, exceptions=(Exception,))
-    async def make_concise(self, text_to_summarize: str) -> str:
-        """
-        Uses OpenAI to make a given text more concise.
+    def __init__(self) -> None:
+        self._lm = get_lm("main")
+        self._concise = dspy.Predict(_Concise)
+        self._keywords = dspy.Predict(_Keywords)
+        self._urgency = dspy.Predict(_Urgency)
 
-        Args:
-            text_to_summarize: The string of text you want to shorten.
+    async def make_concise(self, text: str) -> str:
+        if not text or not text.strip():
+            raise ValueError("text is empty")
 
-        Returns:
-            A string containing the concise version of the text.
-        """
-        try:
-            if not text_to_summarize or not text_to_summarize.strip():
-                raise ValidationError("Please provide some text to make concise")
+        def _run() -> str:
+            with dspy.context(lm=self._lm):
+                return self._concise(text=text).concise.strip()
 
-            with Timer("text_concisification"):
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful assistant skilled at making text more concise and clear while retaining the original meaning within 3-4 words not more than 4 words."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Please make the following text more concise:\n\n---\n\n{text_to_summarize}"
-                        }
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=settings.OPENAI_MAX_TOKENS,
-                    top_p=0.9,
-                    frequency_penalty=1.3,
-                    presence_penalty=0.0
-                )
+        out = await asyncio.to_thread(_run)
+        logger.info("concise_done", original=len(text), shrunk=len(out))
+        return out
 
-                concise_text = response.choices[0].message.content.strip()
-                
-                logger.info(
-                    "Text concisification completed",
-                    extra={
-                        "original_length": len(text_to_summarize),
-                        "concise_length": len(concise_text),
-                        "reduction_ratio": round(
-                            (len(text_to_summarize) - len(concise_text)) / len(text_to_summarize) * 100, 2
-                        )
-                    }
-                )
-                
-                return concise_text
-                
-        except ValidationError:
-            raise
-        except Exception as e:
-            logger.error(f"Text concisification failed: {e}")
-            raise OpenAIError(f"Text concisification failed: {str(e)}")
-    
-    @retry_with_backoff(max_retries=3, exceptions=(Exception,))
     async def extract_keywords(self, text: str, max_keywords: int = 10) -> list[str]:
-        """
-        Extract key terms and phrases from text.
-        
-        Args:
-            text: Input text to analyze
-            max_keywords: Maximum number of keywords to extract
-            
-        Returns:
-            List of extracted keywords
-        """
-        try:
-            if not text or not text.strip():
-                raise ValidationError("Please provide text for keyword extraction")
+        if not text or not text.strip():
+            raise ValueError("text is empty")
 
-            with Timer("keyword_extraction"):
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": f"Extract up to {max_keywords} key terms and phrases from the given text. Return only the keywords separated by commas, no other text."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Extract keywords from this text:\n\n{text}"
-                        }
-                    ],
-                    temperature=0.0,
-                    max_tokens=200
-                )
+        def _run() -> str:
+            with dspy.context(lm=self._lm):
+                return self._keywords(text=text, max_keywords=max_keywords).keywords
 
-                keywords_text = response.choices[0].message.content.strip()
-                keywords = [kw.strip() for kw in keywords_text.split(",") if kw.strip()]
-                
-                logger.info(
-                    "Keywords extracted",
-                    extra={
-                        "text_length": len(text),
-                        "keywords_count": len(keywords)
-                    }
-                )
-                
-                return keywords[:max_keywords]
-                
-        except ValidationError:
-            raise
-        except Exception as e:
-            logger.error(f"Keyword extraction failed: {e}")
-            raise OpenAIError(f"Keyword extraction failed: {str(e)}")
-    
-    @retry_with_backoff(max_retries=3, exceptions=(Exception,))
+        raw = await asyncio.to_thread(_run)
+        kws = [k.strip() for k in raw.split(",") if k.strip()][:max_keywords]
+        logger.info("keywords_done", count=len(kws))
+        return kws
+
     async def classify_urgency(self, text: str) -> str:
-        """
-        Classify the urgency level of a text message.
-        
-        Args:
-            text: Text to classify
-            
-        Returns:
-            Urgency level: "Low", "Medium", or "High"
-        """
-        try:
-            if not text or not text.strip():
-                raise ValidationError("Please provide text for urgency classification")
+        if not text or not text.strip():
+            raise ValueError("text is empty")
 
-            with Timer("urgency_classification"):
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "Classify the urgency level of the given text as Low, Medium, or High. Consider language intensity, time sensitivity, and emotional state. Return only one word: Low, Medium, or High."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Classify the urgency of this message:\n\n{text}"
-                        }
-                    ],
-                    temperature=0.0,
-                    max_tokens=10
-                )
+        def _run() -> str:
+            with dspy.context(lm=self._lm):
+                return self._urgency(text=text).urgency
 
-                urgency = response.choices[0].message.content.strip()
-                
-                if urgency not in ["Low", "Medium", "High"]:
-                    urgency = "Medium"  # Default fallback
-                
-                logger.info(
-                    "Urgency classification completed",
-                    extra={
-                        "text_length": len(text),
-                        "urgency_level": urgency
-                    }
-                )
-                
-                return urgency
-                
-        except ValidationError:
-            raise
-        except Exception as e:
-            logger.error(f"Urgency classification failed: {e}")
-            raise OpenAIError(f"Urgency classification failed: {str(e)}")
+        out = await asyncio.to_thread(_run)
+        logger.info("urgency_done", urgency=out)
+        return out
