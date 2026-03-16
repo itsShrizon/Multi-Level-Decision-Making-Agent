@@ -7,17 +7,20 @@ Topology:
       triage
        /│\\
       / │ \\
-sentiment event risk     <-- run in parallel (BSP step)
+sentiment event risk     <-- parallel BSP step
       \\ │ /
        \\│/
-       respond           <-- merges all branches, decides reply
+       decide            <-- no-op join, just here so we can route from it
         │
-       END
+   ┌────┴────┐
+respond     END          <-- conditional based on triage + risk
+   │
+  END
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -31,7 +34,6 @@ from app.features.chat.services import (
 )
 from app.features.chat.signatures import EventDetails
 
-# module singletons — DSPy modules are cheap but not free to instantiate
 _triage = TriageModule()
 _risk = RiskModule()
 _sentiment = SentimentModule()
@@ -94,17 +96,29 @@ def risk_node(state: ChatGraphState) -> dict[str, Any]:
     return {"risk": {"risk_update": out.risk_update, "risk_score": out.risk_score}}
 
 
-def respond_node(state: ChatGraphState) -> dict[str, Any]:
-    """Generate a reply if the triage + risk combo calls for one."""
+def decide_node(state: ChatGraphState) -> dict[str, Any]:
+    """No-op join. Conditional edge after this picks respond or END."""
+    return {}
+
+
+def route_after_decide(state: ChatGraphState) -> Literal["respond", "skip"]:
     triage = state["triage"]
     risk = state["risk"]
+
+    if triage["should_ignore"]:
+        return "skip"
+    if not triage["should_respond"]:
+        # flag-only with no respond signal — skip auto reply
+        return "skip"
+    if triage["should_flag"] and risk["risk_update"] == "High":
+        # high-risk flagged: humans handle it, no auto reply
+        return "skip"
+    return "respond"
+
+
+def respond_node(state: ChatGraphState) -> dict[str, Any]:
+    triage = state["triage"]
     sentiment = state["sentiment"]
-
-    wants_reply = triage["should_respond"] and not triage["should_ignore"]
-    high_flag_only = triage["should_flag"] and risk["risk_update"] == "High" and not triage["should_respond"]
-    if not wants_reply or high_flag_only:
-        return {"reply": None}
-
     reply = _respond(
         last_message=state["message"],
         triage_reasoning=triage["reasoning"],
@@ -115,24 +129,35 @@ def respond_node(state: ChatGraphState) -> dict[str, Any]:
     return {"reply": reply}
 
 
+def skip_node(state: ChatGraphState) -> dict[str, Any]:
+    return {"reply": None}
+
+
 def build_chat_graph():
     g = StateGraph(ChatGraphState)
     g.add_node("triage", triage_node)
     g.add_node("sentiment", sentiment_node)
     g.add_node("event", event_node)
     g.add_node("risk", risk_node)
+    g.add_node("decide", decide_node)
     g.add_node("respond", respond_node)
+    g.add_node("skip", skip_node)
 
     g.add_edge(START, "triage")
-    # fan out — these three run in the same BSP step
     g.add_edge("triage", "sentiment")
     g.add_edge("triage", "event")
     g.add_edge("triage", "risk")
-    # join — respond runs once, after all three above land
-    g.add_edge("sentiment", "respond")
-    g.add_edge("event", "respond")
-    g.add_edge("risk", "respond")
+    g.add_edge("sentiment", "decide")
+    g.add_edge("event", "decide")
+    g.add_edge("risk", "decide")
+
+    g.add_conditional_edges(
+        "decide",
+        route_after_decide,
+        {"respond": "respond", "skip": "skip"},
+    )
     g.add_edge("respond", END)
+    g.add_edge("skip", END)
 
     return g.compile()
 
