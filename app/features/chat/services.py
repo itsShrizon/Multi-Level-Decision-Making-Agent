@@ -1,13 +1,13 @@
-"""Chat analysis services — DSPy-powered.
+"""Chat analysis services — DSPy modules + a LangGraph orchestrator.
 
-Each agent is a tiny dspy.Module wrapping one signature. ChatOrchestrator
-runs the independent ones in parallel via asyncio.to_thread (DSPy modules
-are sync), then chains risk and reply on top.
+The individual modules (TriageModule, RiskModule, ...) live here so the
+graph can import and instantiate them. ChatOrchestrator is a thin wrapper
+that runs app.features.agent.chat_graph and reshapes the state into the
+dict the API returns.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import dspy
@@ -26,20 +26,8 @@ from app.features.chat.signatures import (
 logger = get_logger(__name__)
 
 
-def _actions_str(decision: Any) -> str:
-    actions = []
-    if decision.should_flag:
-        actions.append("FLAG")
-    if decision.should_respond:
-        actions.append("RESPOND")
-    if decision.should_ignore:
-        actions.append("IGNORE")
-    return ", ".join(actions) or "NONE"
-
-
 def _validate_triage(decision: Any) -> None:
     if decision.should_respond and decision.should_ignore:
-        # don't crash — coerce to a single sane choice
         decision.should_ignore = False
     if not (decision.should_flag or decision.should_respond or decision.should_ignore):
         decision.should_flag = True
@@ -108,14 +96,12 @@ class ResponseModule(dspy.Module):
 
 
 class ChatOrchestrator:
-    """Runs the four analyses, then risk + (optional) reply on top."""
+    """Drives the chat-analysis LangGraph and shapes the result for the API."""
 
     def __init__(self) -> None:
-        self.triage = TriageModule()
-        self.risk = RiskModule()
-        self.sentiment = SentimentModule()
-        self.event = EventModule()
-        self.respond = ResponseModule()
+        # imported here to avoid an import cycle: chat_graph imports the modules above
+        from app.features.agent.chat_graph import chat_graph
+        self._graph = chat_graph
 
     async def analyze_message(
         self,
@@ -128,65 +114,69 @@ class ChatOrchestrator:
         if not current:
             raise ValueError("current message is empty")
 
-        triage, sentiment, event = await asyncio.gather(
-            asyncio.to_thread(self.triage, current),
-            asyncio.to_thread(self.sentiment, current),
-            asyncio.to_thread(self.event, current),
+        final = await self._graph.ainvoke(
+            {
+                "message": current,
+                "history": conversation_history,
+                "client_info": client_info,
+            }
         )
+        return _shape(final, client_info)
 
-        risk = await asyncio.to_thread(self.risk, current, _actions_str(triage))
 
-        reply: str | None = None
-        wants_reply = triage.should_respond and not triage.should_ignore
-        if wants_reply and not (triage.should_flag and risk.risk_update == "High"):
-            reply = await asyncio.to_thread(
-                self.respond,
-                last_message=current,
-                triage_reasoning=triage.reasoning,
-                sentiment=sentiment.sentiment,
-                sentiment_score=sentiment.sentiment_score,
-                is_flagged=triage.should_flag,
-            )
+def _shape(state: dict[str, Any], client_info: dict[str, Any]) -> dict[str, Any]:
+    triage = state["triage"]
+    risk = state["risk"]
+    sentiment = state["sentiment"]
+    event = state["event"]
+    reply = state.get("reply")
 
-        actions = _actions_str(triage).split(", ")
-        event_payload = self._event_payload(event)
+    actions: list[str] = []
+    if triage["should_flag"]:
+        actions.append("FLAG")
+    if triage["should_respond"]:
+        actions.append("RESPOND")
+    if triage["should_ignore"]:
+        actions.append("IGNORE")
 
-        logger.info(
-            "chat_analysis_done",
-            client_id=client_info.get("client_id", "unknown"),
-            actions=actions,
-            risk=risk.risk_update,
-            sentiment=sentiment.sentiment,
-            has_event=event_payload["has_event"],
-        )
+    event_payload = _coerce_event_details(event)
 
-        return {
-            "actions": actions,
-            "triage_reasoning": triage.reasoning,
-            "risk_update": risk.risk_update,
-            "risk_score": risk.risk_score,
-            "sentiment": sentiment.sentiment,
-            "sentiment_score": sentiment.sentiment_score,
-            "response_to_send": reply,
+    logger.info(
+        "chat_analysis_done",
+        client_id=client_info.get("client_id", "unknown"),
+        actions=actions,
+        risk=risk["risk_update"],
+        sentiment=sentiment["sentiment"],
+        has_event=event_payload["has_event"],
+    )
+
+    return {
+        "actions": actions,
+        "triage_reasoning": triage["reasoning"],
+        "risk_update": risk["risk_update"],
+        "risk_score": risk["risk_score"],
+        "sentiment": sentiment["sentiment"],
+        "sentiment_score": sentiment["sentiment_score"],
+        "response_to_send": reply,
+        "event_detection": event_payload,
+        "full_analysis": {
+            "should_flag": triage["should_flag"],
+            "should_respond": triage["should_respond"],
+            "should_ignore": triage["should_ignore"],
+            "risk_update": risk["risk_update"],
+            "sentiment": sentiment["sentiment"],
             "event_detection": event_payload,
-            "full_analysis": {
-                "should_flag": triage.should_flag,
-                "should_respond": triage.should_respond,
-                "should_ignore": triage.should_ignore,
-                "risk_update": risk.risk_update,
-                "sentiment": sentiment.sentiment,
-                "event_detection": event_payload,
-            },
-        }
+        },
+    }
 
-    @staticmethod
-    def _event_payload(event: Any) -> dict[str, Any]:
-        details = event.event_details
-        if isinstance(details, EventDetails):
-            details = details.model_dump()
-        return {
-            "has_event": bool(event.has_event),
-            "event_details": details,
-            "suggested_reminder": event.suggested_reminder,
-            "internal_note": event.internal_note,
-        }
+
+def _coerce_event_details(event: dict[str, Any]) -> dict[str, Any]:
+    details = event.get("event_details")
+    if isinstance(details, EventDetails):
+        details = details.model_dump()
+    return {
+        "has_event": bool(event.get("has_event")),
+        "event_details": details,
+        "suggested_reminder": event.get("suggested_reminder"),
+        "internal_note": event.get("internal_note"),
+    }
