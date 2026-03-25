@@ -1,58 +1,45 @@
-"""
-Shared components and utilities initialization.
-"""
+"""Shared schemas + small request helpers."""
 
 from app.shared.schemas import (
     BaseResponse,
-    ErrorResponse,
-    Message,
-    ClientInfo,
-    ConversationHistory,
-    MessageAnalysisResult,
-    InsightRequest,
-    MicroInsightResult,
-    HighLevelInsightRequest,
-    OutboundMessageRequest,
-    OutboundMessageResult,
     ChatSummarizationRequest,
     ChatSummarizationResult,
+    ClientInfo,
     ConciseRequest,
     ConciseResult,
+    ConversationHistory,
+    ErrorResponse,
+    HighLevelInsightRequest,
+    InsightRequest,
+    Message,
+    MessageAnalysisResult,
+    MicroInsightResult,
+    OutboundMessageRequest,
+    OutboundMessageResult,
 )
-
 from app.shared.utils import (
-    retry_with_backoff,
-    format_messages_for_openai,
-    truncate_conversation_history,
-    sanitize_text,
     extract_client_context,
-    validate_openai_response,
-    Timer,
+    sanitize_text,
+    truncate_conversation_history,
 )
 
 __all__ = [
-    # Schemas
     "BaseResponse",
-    "ErrorResponse", 
-    "Message",
-    "ClientInfo",
-    "ConversationHistory",
-    "MessageAnalysisResult",
-    "InsightRequest",
-    "MicroInsightResult",
-    "HighLevelInsightRequest",
-    "OutboundMessageRequest",
-    "OutboundMessageResult",
     "ChatSummarizationRequest",
     "ChatSummarizationResult",
+    "ClientInfo",
     "ConciseRequest",
     "ConciseResult",
-    # Utils
-    "retry_with_backoff",
-    "format_messages_for_openai",
-    "truncate_conversation_history",
-    "sanitize_text",
+    "ConversationHistory",
+    "ErrorResponse",
+    "HighLevelInsightRequest",
+    "InsightRequest",
+    "Message",
+    "MessageAnalysisResult",
+    "MicroInsightResult",
+    "OutboundMessageRequest",
+    "OutboundMessageResult",
     "extract_client_context",
-    "validate_openai_response",
-    "Timer",
+    "sanitize_text",
+    "truncate_conversation_history",
 ]

@@ -1,11 +1,12 @@
-"""
-Custom exceptions and exception handlers for the application.
-"""
+"""Exceptions + FastAPI handlers."""
 
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
+from typing import Any
+
 from fastapi import Request
-from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.logging import get_logger
@@ -14,14 +15,12 @@ logger = get_logger(__name__)
 
 
 class ApplicationError(Exception):
-    """Base application exception."""
-    
     def __init__(
         self,
         message: str,
-        error_code: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None
-    ):
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         self.message = message
         self.error_code = error_code or self.__class__.__name__
         self.details = details or {}
@@ -29,141 +28,54 @@ class ApplicationError(Exception):
 
 
 class ValidationError(ApplicationError):
-    """Raised when input validation fails."""
     pass
 
 
 class ServiceError(ApplicationError):
-    """Raised when external service calls fail."""
     pass
 
 
-class OpenAIError(ServiceError):
-    """Raised when OpenAI API calls fail."""
-    pass
-
-
-class RateLimitError(ApplicationError):
-    """Raised when rate limit is exceeded."""
-    pass
-
-
-class ConfigurationError(ApplicationError):
-    """Raised when configuration is invalid."""
-    pass
+def _err_body(kind: str, exc: ApplicationError, **extra: Any) -> dict[str, Any]:
+    return {
+        "error": {
+            "type": kind,
+            "code": exc.error_code,
+            "message": exc.message,
+            **extra,
+        }
+    }
 
 
 async def validation_exception_handler(request: Request, exc: ValidationError) -> JSONResponse:
-    """Handle validation errors."""
-    logger.warning(
-        f"Validation error: {exc.message}",
-        extra={
-            "error_code": exc.error_code,
-            "path": request.url.path,
-            "method": request.method,
-            "details": exc.details,
-        }
-    )
-    
-    return JSONResponse(
-        status_code=400,
-        content={
-            "error": {
-                "type": "validation_error",
-                "code": exc.error_code,
-                "message": exc.message,
-                "details": exc.details,
-            }
-        }
-    )
+    logger.warning("validation_error", path=request.url.path, code=exc.error_code, message=exc.message)
+    return JSONResponse(status_code=400, content=_err_body("validation_error", exc, details=exc.details))
 
 
 async def service_exception_handler(request: Request, exc: ServiceError) -> JSONResponse:
-    """Handle service errors."""
-    logger.error(
-        f"Service error: {exc.message}",
-        extra={
-            "error_code": exc.error_code,
-            "path": request.url.path,
-            "method": request.method,
-            "details": exc.details,
-        }
-    )
-    
-    return JSONResponse(
-        status_code=503,
-        content={
-            "error": {
-                "type": "service_error",
-                "code": exc.error_code,
-                "message": "Service temporarily unavailable",
-                "details": {} if isinstance(exc, OpenAIError) else exc.details,
-            }
-        }
-    )
-
-
-async def rate_limit_exception_handler(request: Request, exc: RateLimitError) -> JSONResponse:
-    """Handle rate limit errors."""
-    logger.warning(
-        f"Rate limit exceeded: {exc.message}",
-        extra={
-            "error_code": exc.error_code,
-            "path": request.url.path,
-            "method": request.method,
-            "client_ip": request.client.host if request.client else "unknown",
-        }
-    )
-    
-    return JSONResponse(
-        status_code=429,
-        content={
-            "error": {
-                "type": "rate_limit_error",
-                "code": exc.error_code,
-                "message": "Rate limit exceeded. Please try again later.",
-                "retry_after": exc.details.get("retry_after", 60),
-            }
-        }
-    )
+    logger.error("service_error", path=request.url.path, code=exc.error_code, message=exc.message)
+    body = _err_body("service_error", exc, details=exc.details)
+    body["error"]["message"] = "Service temporarily unavailable"
+    return JSONResponse(status_code=503, content=body)
 
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-    """Handle HTTP exceptions."""
-    logger.warning(
-        f"HTTP error {exc.status_code}: {exc.detail}",
-        extra={
-            "path": request.url.path,
-            "method": request.method,
-            "status_code": exc.status_code,
-        }
-    )
-    
+    logger.warning("http_error", path=request.url.path, status=exc.status_code, detail=str(exc.detail))
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "error": {
                 "type": "http_error",
                 "code": f"HTTP_{exc.status_code}",
-                "message": exc.detail,
+                "message": str(exc.detail),
             }
-        }
+        },
     )
 
 
 async def request_validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Handle FastAPI request validation errors."""
-    logger.warning(
-        f"Request validation error: {exc.errors()}",
-        extra={
-            "path": request.url.path,
-            "method": request.method,
-            "errors": exc.errors(),
-        }
-    )
-    
+    logger.warning("request_validation_error", path=request.url.path, errors=exc.errors())
     return JSONResponse(
         status_code=422,
         content={
@@ -173,22 +85,12 @@ async def request_validation_exception_handler(
                 "message": "Request validation failed",
                 "details": exc.errors(),
             }
-        }
+        },
     )
 
 
 async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle unexpected errors."""
-    logger.error(
-        f"Unexpected error: {str(exc)}",
-        extra={
-            "path": request.url.path,
-            "method": request.method,
-            "exception_type": type(exc).__name__,
-        },
-        exc_info=True,
-    )
-    
+    logger.error("unexpected_error", path=request.url.path, exc_type=type(exc).__name__, exc_info=True)
     return JSONResponse(
         status_code=500,
         content={
@@ -197,5 +99,5 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
                 "code": "INTERNAL_SERVER_ERROR",
                 "message": "An unexpected error occurred",
             }
-        }
+        },
     )

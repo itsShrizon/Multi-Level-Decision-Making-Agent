@@ -1,30 +1,24 @@
-"""
-Core initialization module.
-"""
+"""Core public surface."""
 
-from app.core.config import get_settings, settings
-from app.core.logging import setup_logging, get_logger
-from app.core.dependencies import get_openai_client, get_rate_limiter
+from app.core.config import Settings, get_settings
+from app.core.dependencies import get_rate_limiter
 from app.core.exceptions import (
     ApplicationError,
-    ValidationError,
     ServiceError,
-    OpenAIError,
-    RateLimitError,
-    ConfigurationError,
+    ValidationError,
 )
+from app.core.llm import configure_default_lm, get_lm
+from app.core.logging import get_logger, setup_logging
 
 __all__ = [
-    "get_settings",
-    "settings",
-    "setup_logging",
-    "get_logger",
-    "get_openai_client",
-    "get_rate_limiter",
     "ApplicationError",
+    "ServiceError",
+    "Settings",
     "ValidationError",
-    "ServiceError", 
-    "OpenAIError",
-    "RateLimitError",
-    "ConfigurationError",
+    "configure_default_lm",
+    "get_lm",
+    "get_logger",
+    "get_rate_limiter",
+    "get_settings",
+    "setup_logging",
 ]

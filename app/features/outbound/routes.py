@@ -14,7 +14,7 @@ from app.shared.schemas import (
     OutboundMessageRequest,
     OutboundMessageResult,
 )
-from app.shared.utils import sanitize_text, format_messages_for_openai
+from app.shared.utils import sanitize_text
 from app.features.outbound.services import OutboundMessageGenerator, MessageScheduler
 
 logger = get_logger(__name__)
