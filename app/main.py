@@ -1,74 +1,61 @@
-"""
-FastAPI application entry point for the Multi-Level Chatbot system.
+"""FastAPI app factory."""
 
-This application provides AI-powered chatbot services for law firms including:
-- Message analysis and triage
-- Sentiment analysis
-- Risk assessment
-- Insight generation
-- Outbound message generation
-"""
+from __future__ import annotations
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
 from app.core.config import get_settings
-from app.core.logging import setup_logging, get_logger
 from app.core.exceptions import (
-    ValidationError,
     ServiceError,
-    validation_exception_handler,
-    service_exception_handler,
+    ValidationError,
     general_exception_handler,
+    service_exception_handler,
+    validation_exception_handler,
 )
+from app.core.llm import configure_default_lm
+from app.core.logging import get_logger, setup_logging
+from app.core.rate_limit import limiter
+from app.features.agent import router as agent_router
 from app.features.chat import router as chat_router
 from app.features.insights import router as insights_router
 from app.features.outbound import router as outbound_router
-from app.shared.middleware import (
-    request_logging_middleware,
-    rate_limiting_middleware,
-    error_handling_middleware,
-)
+from app.shared.middleware import error_handling_middleware, request_logging_middleware
 
 settings = get_settings()
-logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan manager for startup and shutdown events.
-    """
-    # Startup
-    logger.info("Starting Multi-Level Chatbot API")
-    logger.info(f"Environment: {settings.ENVIRONMENT}")
-    logger.info(f"API Version: {settings.API_VERSION}")
-    
+    setup_logging()
+    log = get_logger(__name__)
+    configure_default_lm()
+    log.info("startup", env=settings.ENVIRONMENT, version=settings.API_VERSION)
     yield
-    
-    # Shutdown
-    logger.info("Shutting down Multi-Level Chatbot API")
+    log.info("shutdown")
 
 
 def create_application() -> FastAPI:
-    """
-    Create and configure the FastAPI application.
-    """
-    # Setup logging first
     setup_logging()
-    
+    show_docs = not settings.is_prod
+
     app = FastAPI(
-        title="Multi-Level Chatbot API",
-        description="AI-powered chatbot system for law firms with advanced message analysis and insights",
+        title="Multi-Level Decision-Making Agent",
+        description="DSPy + LangGraph orchestrator for law-firm client comms",
         version=settings.API_VERSION,
-        docs_url="/api/docs" if settings.ENVIRONMENT != "production" else None,
-        redoc_url="/api/redoc" if settings.ENVIRONMENT != "production" else None,
-        openapi_url="/api/openapi.json" if settings.ENVIRONMENT != "production" else None,
+        docs_url="/api/docs" if show_docs else None,
+        redoc_url="/api/redoc" if show_docs else None,
+        openapi_url="/api/openapi.json" if show_docs else None,
         lifespan=lifespan,
     )
-    
-    # Configure CORS
+
+    # CORS + trusted host
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.ALLOWED_ORIGINS,
@@ -76,70 +63,55 @@ def create_application() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
-    
-    # Add trusted host middleware for security
-    if settings.ENVIRONMENT == "production":
-        app.add_middleware(
-            TrustedHostMiddleware,
-            allowed_hosts=settings.ALLOWED_HOSTS,
-        )
-    
-    # Add custom middleware
+    if settings.is_prod:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
+
+    # rate limiting via slowapi
+    app.state.limiter = limiter
+    app.add_middleware(SlowAPIMiddleware)
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # custom middleware
     app.middleware("http")(error_handling_middleware)
     app.middleware("http")(request_logging_middleware)
-    app.middleware("http")(rate_limiting_middleware)
-    
-    # Register exception handlers
+
+    # global exception handlers
     app.add_exception_handler(ValidationError, validation_exception_handler)
     app.add_exception_handler(ServiceError, service_exception_handler)
     app.add_exception_handler(Exception, general_exception_handler)
-    
-    # Include routers
-    app.include_router(
-        chat_router,
-        prefix="/api/v1/chat",
-        tags=["Chat Analysis"]
-    )
-    app.include_router(
-        insights_router,
-        prefix="/api/v1/insights",
-        tags=["Insights"]
-    )
-    app.include_router(
-        outbound_router,
-        prefix="/api/v1/outbound",
-        tags=["Outbound Messages"]
-    )
-    
+
+    # routers
+    app.include_router(chat_router, prefix="/api/v1/chat", tags=["Chat Analysis"])
+    app.include_router(insights_router, prefix="/api/v1/insights", tags=["Insights"])
+    app.include_router(outbound_router, prefix="/api/v1/outbound", tags=["Outbound Messages"])
+    app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent"])
+
     @app.get("/", tags=["Health"])
-    async def root():  # type: ignore[misc]
-        """Root endpoint providing API information."""
+    async def root():
         return {
-            "message": "Multi-Level Chatbot API",
+            "service": "mldm-agent",
             "version": settings.API_VERSION,
             "environment": settings.ENVIRONMENT,
-            "status": "healthy"
+            "status": "healthy",
         }
-    
+
     @app.get("/health", tags=["Health"])
-    async def health_check():  # type: ignore[misc]
-        """Health check endpoint for monitoring."""
+    async def health_check():
         return {
             "status": "healthy",
-            "timestamp": settings.get_current_timestamp(),
-            "version": settings.API_VERSION
+            "timestamp": settings.utc_now_iso(),
+            "version": settings.API_VERSION,
         }
-    
+
     return app
 
 
-# Create the application instance
 app = create_application()
 
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "app.main:app",
         host=settings.HOST,
