@@ -1,43 +1,51 @@
-# Use Python 3.11 slim image
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1.7
 
-# Set working directory
-WORKDIR /app
+# ---- builder ----------------------------------------------------------------
+FROM python:3.11-slim AS builder
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
-        git \
+    && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (for better Docker layer caching)
-COPY requirements.txt .
+WORKDIR /build
+COPY pyproject.toml requirements.txt ./
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+# wheels go to /wheels so the runtime stage can pip-install fast and small
+RUN pip wheel --wheel-dir /wheels -r requirements.txt
 
-# Copy application code
-COPY . .
+# ---- runtime ----------------------------------------------------------------
+FROM python:3.11-slim AS runtime
 
-# Create non-root user for security
-RUN adduser --disabled-password --gecos '' --shell /bin/bash appuser \
-    && chown -R appuser:appuser /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# curl only — needed for HEALTHCHECK
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && adduser --disabled-password --gecos '' --uid 10001 appuser
+
+WORKDIR /app
+
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl \
+    && rm -rf /wheels
+
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./
+
 USER appuser
 
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
 
-# Default command
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
