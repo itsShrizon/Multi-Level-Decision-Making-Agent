@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mldm-agent-config
+data:
+  ENVIRONMENT: "development"
+  LOG_LEVEL: "DEBUG"
+  LOG_JSON: "false"
+  ALLOWED_ORIGINS: '["*"]'

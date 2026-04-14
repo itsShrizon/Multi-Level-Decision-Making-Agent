@@ -1,0 +1,21 @@
+# Production gets bigger requests/limits and a stricter rolling update.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mldm-agent
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  template:
+    spec:
+      containers:
+        - name: api
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"

@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mldm-prod
+
+resources:
+  - ../../base
+
+commonLabels:
+  app.kubernetes.io/instance: mldm-agent-prod
+  env: prod
+
+# overlay should pin to a digest after each release, e.g.:
+#   newTag: ""
+#   digest: sha256:abc123...
+images:
+  - name: mldm-agent
+    newName: us-central1-docker.pkg.dev/PROJECT_ID/mldm/mldm-agent
+    newTag: stable
+
+replicas:
+  - name: mldm-agent
+    count: 4
+
+patches:
+  - path: deployment-prod.yaml
+    target:
+      kind: Deployment
+      name: mldm-agent
+  - path: hpa-prod.yaml
+    target:
+      kind: HorizontalPodAutoscaler
+      name: mldm-agent
