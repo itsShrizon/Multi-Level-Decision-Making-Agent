@@ -1,0 +1,60 @@
+# Cloud Build pipeline:
+#   1. build the runtime image
+#   2. push tagged + digest-pinned to Artifact Registry
+#   3. render the kustomize overlay for the target env
+#   4. apply via gke-deploy
+#
+# Trigger this with branch substitutions, e.g.:
+#   _ENV=dev / staging / prod
+#   _CLUSTER=mldm-prod   _LOCATION=us-central1
+#
+# The default _IMAGE points at Artifact Registry; override to swap projects.
+
+substitutions:
+  _ENV: dev
+  _IMAGE: us-central1-docker.pkg.dev/${PROJECT_ID}/mldm/mldm-agent
+  _CLUSTER: mldm-${_ENV}
+  _LOCATION: us-central1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+images:
+  - "${_IMAGE}:${SHORT_SHA}"
+  - "${_IMAGE}:${_ENV}"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_IMAGE}:${SHORT_SHA}
+      - --tag=${_IMAGE}:${_ENV}
+      - --cache-from=${_IMAGE}:${_ENV}
+      - --build-arg=BUILDKIT_INLINE_CACHE=1
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, "${_IMAGE}"]
+
+  - id: kustomize
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        gcloud components install kustomize --quiet
+        cd deploy/k8s/overlays/${_ENV}
+        kustomize edit set image mldm-agent=${_IMAGE}:${SHORT_SHA}
+        kustomize build . > /workspace/manifests.yaml
+
+  - id: deploy
+    name: gcr.io/cloud-builders/gke-deploy
+    args:
+      - run
+      - --filename=/workspace/manifests.yaml
+      - --location=${_LOCATION}
+      - --cluster=${_CLUSTER}
