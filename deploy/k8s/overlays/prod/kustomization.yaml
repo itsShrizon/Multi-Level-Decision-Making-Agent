@@ -31,3 +31,11 @@ patches:
     target:
       kind: HorizontalPodAutoscaler
       name: mldm-agent
+  - path: ../../../gcp/workload-identity.yaml
+    target:
+      kind: ServiceAccount
+      name: mldm-agent
+  - path: ../../../gcp/cloudsql-sidecar.yaml
+    target:
+      kind: Deployment
+      name: mldm-agent

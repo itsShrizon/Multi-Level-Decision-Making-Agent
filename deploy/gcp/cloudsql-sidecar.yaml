@@ -1,0 +1,38 @@
+# Strategic-merge patch: adds the Cloud SQL Auth Proxy as a sidecar so
+# the app talks to localhost:5432 over a TLS-tunneled IAM-authenticated
+# connection. Pair this with workload-identity.yaml for IAM auth.
+#
+# Replace PROJECT_ID:REGION:INSTANCE before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mldm-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: DATABASE_URL
+              value: postgresql+asyncpg://mldm-agent@127.0.0.1:5432/chatbot_db
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.13.0
+          args:
+            - --structured-logs
+            - --auto-iam-authn
+            - --port=5432
+            - PROJECT_ID:REGION:INSTANCE
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

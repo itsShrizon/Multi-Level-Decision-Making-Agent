@@ -1,0 +1,28 @@
+# Workload Identity binding. The KSA from base/deployment.yaml gets
+# annotated to impersonate the GSA, and the GSA holds the IAM grants
+# for Secret Manager + Cloud SQL.
+#
+# One-time setup outside of Kustomize:
+#
+#   gcloud iam service-accounts create mldm-agent --project PROJECT_ID
+#
+#   gcloud projects add-iam-policy-binding PROJECT_ID \
+#     --member "serviceAccount:mldm-agent@PROJECT_ID.iam.gserviceaccount.com" \
+#     --role roles/secretmanager.secretAccessor
+#
+#   gcloud projects add-iam-policy-binding PROJECT_ID \
+#     --member "serviceAccount:mldm-agent@PROJECT_ID.iam.gserviceaccount.com" \
+#     --role roles/cloudsql.client
+#
+#   gcloud iam service-accounts add-iam-policy-binding \
+#     mldm-agent@PROJECT_ID.iam.gserviceaccount.com \
+#     --role roles/iam.workloadIdentityUser \
+#     --member "serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/mldm-agent]"
+#
+# The patch below glues the KSA to the GSA inside the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mldm-agent
+  annotations:
+    iam.gke.io/gcp-service-account: mldm-agent@PROJECT_ID.iam.gserviceaccount.com
