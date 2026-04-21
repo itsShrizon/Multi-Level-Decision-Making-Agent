@@ -5,6 +5,7 @@ namespace: mldm-prod
 
 resources:
   - ../../base
+  - ../../../gcp/external-secrets.yaml
 
 commonLabels:
   app.kubernetes.io/instance: mldm-agent-prod
