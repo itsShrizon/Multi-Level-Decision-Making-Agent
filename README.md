@@ -1,233 +1,151 @@
-# Multi-Level Chatbot API
+# Multi-Level Decision-Making Agent
 
-A sophisticated FastAPI-based AI chatbot system for law firms with advanced message analysis, insights generation, and outbound messaging capabilities.
-
-## Features
-
-### 🤖 Chat Analysis
-- **Message Triage**: Automatically classify messages as FLAG, IGNORE, or RESPOND
-- **Risk Assessment**: Evaluate client retention risk with scoring
-- **Sentiment Analysis**: Analyze client sentiment with numerical scoring
-- **Event Detection**: Identify appointments and important dates
-- **Response Generation**: Generate contextual responses based on analysis
-
-### 📊 Insights Generation
-- **Micro Insights**: Single-sentence client insights with sentiment embedding
-- **High-Level Insights**: Comprehensive firm-wide analytics reports
-- **Summary Insights**: Quick dashboard-ready insights
-
-### 📧 Outbound Messaging
-- **Proactive Messages**: Generate weekly check-ins and follow-ups
-- **Appointment Reminders**: Automated appointment reminder scheduling
-- **Case Updates**: Professional case progress communications
-- **Message Scheduling**: Intelligent scheduling based on client preferences
-
-### 🔧 Text Processing
-- **Chat Summarization**: Generate conversation summaries
-- **Text Concisification**: Make text concise while preserving meaning
-- **Keyword Extraction**: Extract key terms from conversations
-- **Urgency Classification**: Classify message urgency levels
+DSPy-powered, LangGraph-orchestrated FastAPI service for law-firm client comms:
+triage, risk, sentiment, event detection, contextual replies, micro/high-level
+insights, and outbound message drafting.
 
 ## Architecture
 
 ```
-apply-job-agent-backend/
-├── app/
-│   ├── core/               # Core application components
-│   │   ├── config.py       # Configuration management
-│   │   ├── dependencies.py # Dependency injection
-│   │   ├── exceptions.py   # Custom exceptions
-│   │   └── logging.py      # Logging configuration
-│   ├── features/           # Feature modules
-│   │   ├── chat/           # Chat analysis features
-│   │   ├── insights/       # Insights generation
-│   │   └── outbound/       # Outbound messaging
-│   ├── shared/             # Shared components
-│   │   ├── schemas.py      # Pydantic models
-│   │   ├── utils.py        # Utility functions
-│   │   └── middleware.py   # Custom middleware
-│   └── main.py             # Application entry point
-├── alembic/                # Database migrations
-├── docker-compose.yml      # Docker configuration
-└── requirements.txt        # Python dependencies
+                        +----------------------+
+        client request  |  FastAPI (uvicorn)   |
+        ------------->  |  slowapi rate-limit  |
+                        |  structlog access    |
+                        +----------+-----------+
+                                   |
+              +--------------------+---------------------+
+              v                    v                     v
+      /api/v1/chat          /api/v1/insights      /api/v1/outbound
+        + /agent
+              |                    |                     |
+              v                    v                     v
+   +------------------+    +------------------+    +-----------------+
+   |  ChatOrchestr.   |    |  MicroInsight    |    |  Outbound       |
+   |    |             |    |  + HighLevel     |    |  Generator      |
+   |    v             |    |  (DSPy)          |    |  (DSPy)         |
+   | chat_graph       |    +------------------+    +-----------------+
+   |  (LangGraph DAG) |
+   +----+-------------+
+        |
+        v
+     triage
+       /|\
+      / | \
+sentiment event risk      <-- parallel BSP step (LangGraph)
+      \ | /
+       \|/
+      decide
+        |
+   +----+----+
+respond     skip          <-- conditional edge (FLAG/IGNORE/RESPOND)
+   |         |
+   +----+----+
+        v
+       END
 ```
 
-## Quick Start
+Underneath, every LM call is a tiny `dspy.Module` wrapping a `dspy.Signature`.
+Tier selection (`main` / `fast` / `summary` / `report`) lives in `app.core.llm`,
+so swapping providers (OpenAI / Gemini / anything LiteLLM-compatible) is a
+single env-var change per tier.
 
-### Prerequisites
-- Python 3.11+
-- OpenAI API key
-- Redis (optional, for caching)
-- PostgreSQL (optional, for data persistence)
+## Layout
 
-### Installation
+```
+app/
+  core/                 # config, llm provider, logging, rate limit, exceptions
+  features/
+    chat/               # signatures + DSPy modules + routes (analyze, summarize, concise)
+    insights/           # micro + high-level (Gemini Pro by default)
+    outbound/           # check-in / follow-up / appointment / case update
+    agent/              # LangGraph DAGs (chat_graph, tool-calling agent) + SSE /stream
+  shared/               # request/response schemas, sanitizers, response envelope
+  main.py               # app factory
+deploy/
+  k8s/
+    base/               # deployment, service, configmap, secret, hpa, pdb, networkpolicy
+    overlays/           # dev / staging / prod (kustomize)
+  gcp/                  # cloudbuild, workload-identity, cloud-sql-proxy, external-secrets
+tests/
+```
 
-1. **Clone and setup the project:**
+## Quickstart
+
 ```bash
-cd apply-job-agent-backend
-cp .env.example .env
+cp .env.example .env       # set OPENAI_API_KEY (and GEMINI_API_KEY if using report tier)
+make install               # uv preferred, falls back to pip
+make dev                   # uvicorn --reload on :8000
 ```
 
-2. **Configure environment variables:**
-Edit `.env` file with your settings:
-```env
-OPENAI_API_KEY=your-openai-api-key-here
-ENVIRONMENT=development
-DEBUG=true
-```
+Or with the full stack:
 
-3. **Install dependencies:**
 ```bash
-pip install -r requirements.txt
+docker compose up -d       # api + postgres + redis
+curl http://localhost:8000/health
 ```
 
-4. **Run the application:**
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+OpenAPI docs: http://localhost:8000/api/docs
 
-### Using Docker
+## API surface
 
-1. **Build and run with Docker Compose:**
-```bash
-docker-compose up --build
-```
-
-2. **Access the API:**
-- API: http://localhost:8000
-- Documentation: http://localhost:8000/api/docs
-- Flower (Celery monitoring): http://localhost:5555
-
-## API Endpoints
-
-### Chat Analysis
-- `POST /api/v1/chat/analyze` - Analyze client messages
-- `POST /api/v1/chat/summarize` - Summarize conversations
-- `POST /api/v1/chat/make-concise` - Make text concise
-
-### Insights
-- `POST /api/v1/insights/micro` - Generate micro insights
-- `POST /api/v1/insights/high-level` - Generate firm insights
-- `POST /api/v1/insights/summary` - Generate summary insights
-
-### Outbound Messaging
-- `POST /api/v1/outbound/generate` - Generate outbound messages
-- `POST /api/v1/outbound/follow-up` - Generate follow-up messages
-- `POST /api/v1/outbound/appointment-reminder` - Generate appointment reminders
-- `POST /api/v1/outbound/case-update` - Generate case updates
+| Method | Path                                  | What it does                          |
+| ------ | ------------------------------------- | ------------------------------------- |
+| POST   | `/api/v1/chat/analyze`                | Full triage + risk + sentiment + reply|
+| POST   | `/api/v1/chat/summarize`              | Conversation summary                  |
+| POST   | `/api/v1/chat/make-concise`           | Shorten text (<= 4 words)             |
+| POST   | `/api/v1/insights/micro`              | Per-client one-sentence insight       |
+| POST   | `/api/v1/insights/high-level`         | Firm-wide leadership report           |
+| POST   | `/api/v1/insights/summary`            | Dashboard insights JSON               |
+| POST   | `/api/v1/outbound/generate`           | Weekly check-in draft                 |
+| POST   | `/api/v1/outbound/follow-up`          | Follow-up message                     |
+| POST   | `/api/v1/outbound/appointment-reminder` | Reminder draft                      |
+| POST   | `/api/v1/outbound/case-update`        | Case progress message                 |
+| POST   | `/api/v1/agent/invoke`                | Tool-calling agent (one-shot)         |
+| POST   | `/api/v1/agent/stream`                | SSE stream of chat_graph node updates |
 
 ## Configuration
 
-### Environment Variables
+All settings come from env vars (see `.env.example`). Highlights:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key | Required |
-| `ENVIRONMENT` | Environment (development/production) | development |
-| `HOST` | Server host | 0.0.0.0 |
-| `PORT` | Server port | 8000 |
-| `DATABASE_URL` | PostgreSQL connection URL | Optional |
-| `REDIS_URL` | Redis connection URL | Optional |
-| `RATE_LIMIT_REQUESTS` | Rate limit per minute | 100 |
-| `MAX_CONVERSATION_HISTORY` | Max messages to process | 500 |
+- `LM_MAIN`, `LM_FAST`, `LM_SUMMARY`, `LM_REPORT` — `provider/model` strings;
+  DSPy + LiteLLM route based on the prefix.
+- `LOG_JSON` — `true` in prod, `false` for human-readable dev logs.
+- `RATE_LIMIT` — slowapi-style string (e.g. `100/minute`); honored globally.
+- `REDIS_URL` — when set, slowapi uses it as the rate-limit backing store.
 
-### OpenAI Models
+## Deployment
 
-- **GPT-4o**: Primary model for complex analysis
-- **GPT-3.5-turbo**: For chat summarization
-- **GPT-4o-mini**: For micro insights and quick tasks
+Local image:
 
-## Features Deep Dive
-
-### Message Analysis Pipeline
-
-1. **Triage Agent**: Determines if message needs FLAG, IGNORE, or RESPOND
-2. **Risk Agent**: Assesses client retention risk (Low/Medium/High + score)
-3. **Sentiment Agent**: Analyzes sentiment (Positive/Neutral/Negative + score)
-4. **Event Detection**: Identifies appointments and creates reminders
-5. **Response Generator**: Creates contextual responses when needed
-
-### Insights Engine
-
-- **Micro Insights**: Real-time, single-sentence client insights
-- **High-Level Reports**: Comprehensive business intelligence for firm leadership
-- **Sentiment Tracking**: Continuous sentiment monitoring with historical context
-
-### Outbound Messaging
-
-- **Context-Aware**: Analyzes full conversation history for tone matching
-- **Scheduling**: Intelligent message scheduling based on preferences
-- **Multi-Type**: Weekly check-ins, appointment reminders, case updates
-
-## Security Features
-
-- **Rate Limiting**: Configurable request rate limiting
-- **Input Validation**: Comprehensive input sanitization
-- **Error Handling**: Structured error responses
-- **CORS Configuration**: Configurable cross-origin policies
-- **Trusted Hosts**: Host validation for production
-
-## Monitoring & Logging
-
-- **Structured Logging**: Comprehensive request/response logging
-- **Health Checks**: Built-in health monitoring endpoints
-- **Background Tasks**: Async analytics and logging
-- **Error Tracking**: Detailed error logging with context
-
-## Development
-
-### Running Tests
 ```bash
-pytest -v --cov=app tests/
+make build                       # docker build -t mldm-agent:dev
 ```
 
-### Code Formatting
+Kubernetes (kustomize):
+
 ```bash
-black app/
-isort app/
-flake8 app/
+kubectl apply -k deploy/k8s/overlays/dev
+kubectl apply -k deploy/k8s/overlays/prod
 ```
 
-### Type Checking
+GCP (Cloud Build -> Artifact Registry -> GKE):
+
 ```bash
-mypy app/
+gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
+  --substitutions=_ENV=prod,_CLUSTER=mldm-prod,_LOCATION=us-central1
 ```
 
-## Production Deployment
+The prod overlay layers in workload identity, the Cloud SQL Auth Proxy
+sidecar, and External Secrets Operator wiring against Secret Manager.
 
-### Using Docker
+## Tests
+
 ```bash
-docker-compose -f docker-compose.yml --profile production up -d
+make test          # pytest (chat module unit tests + chat_graph integration)
+make lint          # ruff check
+make fmt           # ruff format
+make type          # mypy
 ```
 
-### Environment Setup
-- Set `ENVIRONMENT=production`
-- Use strong `SECRET_KEY`
-- Configure proper database and Redis instances
-- Set up SSL/TLS certificates
-- Configure monitoring and logging
-
-### Scaling Considerations
-- Use Redis for distributed rate limiting
-- Configure database connection pooling
-- Set up load balancing for multiple instances
-- Monitor OpenAI API usage and costs
-
-## API Documentation
-
-Interactive API documentation is available at:
-- Swagger UI: `/api/docs`
-- ReDoc: `/api/redoc`
-- OpenAPI JSON: `/api/openapi.json`
-
-## Support
-
-For issues and questions:
-1. Check the logs: `docker-compose logs api`
-2. Verify environment configuration
-3. Check OpenAI API key and quotas
-4. Review the API documentation
-
-## License
-
-This project is proprietary software. All rights reserved.
+The DSPy-backed tests use a tiny in-process `dspy.LM` subclass / monkeypatched
+modules — no API keys or network required.
