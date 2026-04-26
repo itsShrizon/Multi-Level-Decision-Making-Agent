@@ -1,20 +1,8 @@
-"""LangGraph state schemas.
-
-Two graphs live in this package:
-  AgentState     — the high-level tool-calling agent (graph.py)
-  ChatGraphState — the chat-analysis fan-out DAG (chat_graph.py)
-"""
+"""LangGraph state schema for the chat-analysis DAG."""
 
 from __future__ import annotations
 
-import operator
-from typing import Annotated, Any, Sequence, TypedDict
-
-from langchain_core.messages import BaseMessage
-
-
-class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+from typing import Any, TypedDict
 
 
 class ChatGraphState(TypedDict, total=False):

@@ -100,7 +100,6 @@ OpenAPI docs: http://localhost:8000/api/docs
 | POST   | `/api/v1/outbound/follow-up`          | Follow-up message                     |
 | POST   | `/api/v1/outbound/appointment-reminder` | Reminder draft                      |
 | POST   | `/api/v1/outbound/case-update`        | Case progress message                 |
-| POST   | `/api/v1/agent/invoke`                | Tool-calling agent (one-shot)         |
 | POST   | `/api/v1/agent/stream`                | SSE stream of chat_graph node updates |
 
 ## Configuration
