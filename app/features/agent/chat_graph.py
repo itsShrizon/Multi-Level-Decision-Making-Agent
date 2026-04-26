@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -219,7 +220,11 @@ def skip_node(state: ChatGraphState) -> dict[str, Any]:
     return {"reply": None}
 
 
-def build_chat_graph():
+def build_chat_graph(checkpointer=None):
+    """Compile the graph. Defaults to a process-local MemorySaver — fine for
+    single-instance dev. In prod, pass an AsyncSqliteSaver or a Postgres
+    checkpointer so HITL pauses survive restarts and load-balanced replicas.
+    """
     g = StateGraph(ChatGraphState)
     g.add_node("retrieve_context", retrieve_context_node)
     g.add_node("triage", triage_node)
@@ -255,7 +260,7 @@ def build_chat_graph():
     g.add_edge("await_human", END)
     g.add_edge("skip", END)
 
-    return g.compile()
+    return g.compile(checkpointer=checkpointer or MemorySaver())
 
 
 chat_graph = build_chat_graph()

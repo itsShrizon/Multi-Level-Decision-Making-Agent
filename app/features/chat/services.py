@@ -129,6 +129,7 @@ class ChatOrchestrator:
         self,
         client_info: dict[str, Any],
         conversation_history: list[dict[str, Any]],
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         if not conversation_history:
             raise ValueError("conversation history is empty")
@@ -136,14 +137,24 @@ class ChatOrchestrator:
         if not current:
             raise ValueError("current message is empty")
 
+        # Same client => same thread => the graph remembers prior state
+        # (refine_count, partial branch outputs, paused await_human, ...).
+        thread = thread_id or str(client_info.get("client_id") or "anonymous")
+        config = {"configurable": {"thread_id": thread}}
+
         final = await self._graph.ainvoke(
             {
                 "message": current,
                 "history": conversation_history,
                 "client_info": client_info,
-            }
+            },
+            config=config,
         )
-        return _shape(final, client_info)
+        shaped = _shape(final, client_info)
+        # surface the thread + whether the graph paused for a human
+        shaped["thread_id"] = thread
+        shaped["awaiting_human"] = bool(final.get("__interrupt__"))
+        return shaped
 
 
 def _shape(state: dict[str, Any], client_info: dict[str, Any]) -> dict[str, Any]:
