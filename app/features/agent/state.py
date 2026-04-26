@@ -28,3 +28,7 @@ class ChatGraphState(TypedDict, total=False):
     critic_score: int | None
     critic_notes: str
     refine_count: int
+
+    # human-in-the-loop result (set when graph resumes from await_human)
+    # shape: {"action": "send" | "skip", "reply": str | None, "reviewer": str}
+    human_decision: dict[str, Any] | None

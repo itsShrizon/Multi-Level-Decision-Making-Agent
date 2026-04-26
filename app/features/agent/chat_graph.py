@@ -14,14 +14,19 @@ sentiment event risk    <-- parallel BSP step
        \\|/
        decide           <-- conditional routing
         |
-   +----+----+
-respond     skip
-   |
- critic                 <-- LM-graded quality gate
-   |
- (score < THRESHOLD and refine_count < MAX) ──loop──> respond
-   |
-  END
+   +----+----+----------+
+respond     skip     await_human   <-- FLAG+High pauses here via interrupt()
+   |         |         |
+ critic      |         | (resume with Command(resume={action, reply, reviewer}))
+  /\\         |         |
+ /  \\        |         |
+refine done  |         |
+ |    \\     |         |
+respond \\   |         |
+(loop)   \\  |         |
+          \\ |         |
+           v v         v
+            END
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from app.core.logging import get_logger
 from app.features.agent.state import ChatGraphState
@@ -45,8 +51,6 @@ from app.features.chat.signatures import EventDetails
 
 logger = get_logger(__name__)
 
-# Quality gate knobs. THRESHOLD comes from the worst-of-three rubric in
-# CritiqueReply; MAX caps the loop so a stubborn critic can't burn budget.
 CRITIC_THRESHOLD = 75
 MAX_REFINE = 2
 
@@ -125,15 +129,18 @@ def decide_node(state: ChatGraphState) -> dict[str, Any]:
     return {}
 
 
-def route_after_decide(state: ChatGraphState) -> Literal["respond", "skip"]:
+def route_after_decide(state: ChatGraphState) -> Literal["respond", "skip", "await_human"]:
     triage = state["triage"]
     risk = state["risk"]
 
     if triage["should_ignore"]:
         return "skip"
-    if not triage["should_respond"]:
+    if not triage["should_respond"] and not triage["should_flag"]:
         return "skip"
     if triage["should_flag"] and risk["risk_update"] == "High":
+        # don't auto-reply; pause for a real human
+        return "await_human"
+    if not triage["should_respond"]:
         return "skip"
     return "respond"
 
@@ -166,7 +173,6 @@ def critic_node(state: ChatGraphState) -> dict[str, Any]:
     return {
         "critic_score": out.score,
         "critic_notes": out.notes or "",
-        # only bump the counter when we're about to loop back
         "refine_count": refine_count + (1 if out.score < CRITIC_THRESHOLD else 0),
     }
 
@@ -176,9 +182,37 @@ def route_after_critic(state: ChatGraphState) -> Literal["refine", "done"]:
     if score >= CRITIC_THRESHOLD:
         return "done"
     if state.get("refine_count", 0) > MAX_REFINE:
-        # bail — keep the latest draft, don't burn more tokens
         return "done"
     return "refine"
+
+
+def await_human_node(state: ChatGraphState) -> dict[str, Any]:
+    """Pause execution until a human resumes the graph.
+
+    The first call lifts a GraphInterrupt with the payload below; the caller
+    persists the run by thread_id and shows the reviewer the context. When
+    the reviewer is done, resume with:
+
+        graph.invoke(Command(resume={"action": "send", "reply": "...",
+                                       "reviewer": "alice@firm.com"}),
+                       config={"configurable": {"thread_id": ...}})
+
+    The second invocation re-enters this node and interrupt() returns the
+    resume value, which we land into state.
+    """
+    payload = {
+        "reason": "FLAG + High risk — needs human review",
+        "client_message": state["message"],
+        "triage_reasoning": state["triage"]["reasoning"],
+        "risk": state["risk"],
+        "sentiment": state["sentiment"],
+        "prior_insights": state.get("prior_insights", []),
+    }
+    decision = interrupt(payload) or {}
+    action = decision.get("action") or "skip"
+    if action == "send":
+        return {"reply": decision.get("reply"), "human_decision": decision}
+    return {"reply": None, "human_decision": decision}
 
 
 def skip_node(state: ChatGraphState) -> dict[str, Any]:
@@ -195,6 +229,7 @@ def build_chat_graph():
     g.add_node("decide", decide_node)
     g.add_node("respond", respond_node)
     g.add_node("critic", critic_node)
+    g.add_node("await_human", await_human_node)
     g.add_node("skip", skip_node)
 
     g.add_edge(START, "retrieve_context")
@@ -209,15 +244,15 @@ def build_chat_graph():
     g.add_conditional_edges(
         "decide",
         route_after_decide,
-        {"respond": "respond", "skip": "skip"},
+        {"respond": "respond", "skip": "skip", "await_human": "await_human"},
     )
-    # respond -> critic -> (refine -> respond) | (done -> END)
     g.add_edge("respond", "critic")
     g.add_conditional_edges(
         "critic",
         route_after_critic,
         {"refine": "respond", "done": END},
     )
+    g.add_edge("await_human", END)
     g.add_edge("skip", END)
 
     return g.compile()
