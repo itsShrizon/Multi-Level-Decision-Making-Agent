@@ -23,5 +23,8 @@ class ChatGraphState(TypedDict, total=False):
     event: dict[str, Any]
     risk: dict[str, Any]
 
-    # final reply (None if we deliberately skipped it)
+    # reply pipeline
     reply: str | None
+    critic_score: int | None
+    critic_notes: str
+    refine_count: int

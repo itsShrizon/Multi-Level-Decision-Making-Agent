@@ -4,7 +4,7 @@ Topology:
 
       START
         |
-   retrieve_context     <-- pulls prior insights / case state into state
+   retrieve_context     <-- prior insights / case state
         |
       triage
        /|\\
@@ -12,14 +12,16 @@ Topology:
 sentiment event risk    <-- parallel BSP step
       \\ | /
        \\|/
-       decide           <-- no-op join, conditional edge picks the next step
+       decide           <-- conditional routing
         |
    +----+----+
 respond     skip
-   |         |
-   +----+----+
-        v
-       END
+   |
+ critic                 <-- LM-graded quality gate
+   |
+ (score < THRESHOLD and refine_count < MAX) ──loop──> respond
+   |
+  END
 """
 
 from __future__ import annotations
@@ -28,9 +30,11 @@ from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
+from app.core.logging import get_logger
 from app.features.agent.state import ChatGraphState
 from app.features.chat.context import default_repo
 from app.features.chat.services import (
+    CriticModule,
     EventModule,
     ResponseModule,
     RiskModule,
@@ -39,11 +43,19 @@ from app.features.chat.services import (
 )
 from app.features.chat.signatures import EventDetails
 
+logger = get_logger(__name__)
+
+# Quality gate knobs. THRESHOLD comes from the worst-of-three rubric in
+# CritiqueReply; MAX caps the loop so a stubborn critic can't burn budget.
+CRITIC_THRESHOLD = 75
+MAX_REFINE = 2
+
 _triage = TriageModule()
 _risk = RiskModule()
 _sentiment = SentimentModule()
 _event = EventModule()
 _respond = ResponseModule()
+_critic = CriticModule()
 
 
 def _actions(triage: dict[str, Any]) -> list[str]:
@@ -58,10 +70,6 @@ def _actions(triage: dict[str, Any]) -> list[str]:
 
 
 async def retrieve_context_node(state: ChatGraphState) -> dict[str, Any]:
-    """Look up prior insights / sentiment / case data before triage runs.
-
-    Empty by default; ContextRepo is the swap point for real persistence.
-    """
     client_id = (state.get("client_info") or {}).get("client_id", "")
     if not client_id:
         return {"prior_insights": [], "open_case_data": {}, "last_sentiment": None, "last_risk": None}
@@ -88,12 +96,7 @@ def triage_node(state: ChatGraphState) -> dict[str, Any]:
 
 def sentiment_node(state: ChatGraphState) -> dict[str, Any]:
     out = _sentiment(state["message"])
-    return {
-        "sentiment": {
-            "sentiment": out.sentiment,
-            "sentiment_score": out.sentiment_score,
-        }
-    }
+    return {"sentiment": {"sentiment": out.sentiment, "sentiment_score": out.sentiment_score}}
 
 
 def event_node(state: ChatGraphState) -> dict[str, Any]:
@@ -144,8 +147,38 @@ def respond_node(state: ChatGraphState) -> dict[str, Any]:
         sentiment=sentiment["sentiment"],
         sentiment_score=sentiment["sentiment_score"],
         is_flagged=triage["should_flag"],
+        critic_notes=state.get("critic_notes", ""),
     )
     return {"reply": reply}
+
+
+def critic_node(state: ChatGraphState) -> dict[str, Any]:
+    triage = state["triage"]
+    sentiment = state["sentiment"]
+    out = _critic(
+        client_message=state["message"],
+        sentiment=sentiment["sentiment"],
+        is_flagged=triage["should_flag"],
+        draft_reply=state.get("reply") or "",
+    )
+    refine_count = state.get("refine_count", 0)
+    logger.info("critic_done", score=out.score, refine_count=refine_count)
+    return {
+        "critic_score": out.score,
+        "critic_notes": out.notes or "",
+        # only bump the counter when we're about to loop back
+        "refine_count": refine_count + (1 if out.score < CRITIC_THRESHOLD else 0),
+    }
+
+
+def route_after_critic(state: ChatGraphState) -> Literal["refine", "done"]:
+    score = state.get("critic_score") or 0
+    if score >= CRITIC_THRESHOLD:
+        return "done"
+    if state.get("refine_count", 0) > MAX_REFINE:
+        # bail — keep the latest draft, don't burn more tokens
+        return "done"
+    return "refine"
 
 
 def skip_node(state: ChatGraphState) -> dict[str, Any]:
@@ -161,6 +194,7 @@ def build_chat_graph():
     g.add_node("risk", risk_node)
     g.add_node("decide", decide_node)
     g.add_node("respond", respond_node)
+    g.add_node("critic", critic_node)
     g.add_node("skip", skip_node)
 
     g.add_edge(START, "retrieve_context")
@@ -177,7 +211,13 @@ def build_chat_graph():
         route_after_decide,
         {"respond": "respond", "skip": "skip"},
     )
-    g.add_edge("respond", END)
+    # respond -> critic -> (refine -> respond) | (done -> END)
+    g.add_edge("respond", "critic")
+    g.add_conditional_edges(
+        "critic",
+        route_after_critic,
+        {"refine": "respond", "done": END},
+    )
     g.add_edge("skip", END)
 
     return g.compile()

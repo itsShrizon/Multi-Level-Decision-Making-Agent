@@ -93,6 +93,10 @@ class GenerateResponse(dspy.Signature):
     For flagged messages with serious content, do NOT use casual filler like
     "great question" — match the seriousness. If flagged, also let them know
     a team member is being looped in.
+
+    If critic_notes is non-empty, treat it as feedback on the previous draft
+    and address it directly in this revision.
+
     Output only the reply text — no quotes, labels, or commentary.
     """
 
@@ -101,5 +105,27 @@ class GenerateResponse(dspy.Signature):
     sentiment: str = dspy.InputField()
     sentiment_score: int = dspy.InputField()
     is_flagged: bool = dspy.InputField()
+    critic_notes: str = dspy.InputField(desc="Empty on the first pass; feedback on retries")
 
     reply: str = dspy.OutputField()
+
+
+class CritiqueReply(dspy.Signature):
+    """Score a draft reply on three axes and explain what to fix.
+
+    score is 0-100. Apply the lowest of the three sub-scores (worst link wins):
+      - tone_match  : does it mirror the client's sentiment / register?
+      - safety      : avoids legal advice, promises, or anything risky?
+      - brevity     : short, direct, no rambling?
+
+    notes is one or two short sentences a follow-up draft can act on.
+    If the reply is already good, set score >= 80 and notes empty.
+    """
+
+    client_message: str = dspy.InputField()
+    sentiment: str = dspy.InputField()
+    is_flagged: bool = dspy.InputField()
+    draft_reply: str = dspy.InputField()
+
+    score: int = dspy.OutputField(desc="0-100, worst-of-three")
+    notes: str = dspy.OutputField()

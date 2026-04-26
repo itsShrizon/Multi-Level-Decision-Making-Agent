@@ -15,6 +15,7 @@ import dspy
 from app.core.llm import get_lm
 from app.core.logging import get_logger
 from app.features.chat.signatures import (
+    CritiqueReply,
     EventDetect,
     EventDetails,
     GenerateResponse,
@@ -89,10 +90,31 @@ class ResponseModule(dspy.Module):
         )
         self.predict = dspy.Predict(GenerateResponse)
 
-    def forward(self, **kwargs):
+    def forward(self, *, critic_notes: str = "", **kwargs):
         with dspy.context(lm=self._lm_warm):
-            out = self.predict(**kwargs)
+            out = self.predict(critic_notes=critic_notes, **kwargs)
         return out.reply.strip().strip('"').strip("'")
+
+
+class CriticModule(dspy.Module):
+    """Reads the client message + draft reply, returns score + fix notes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # use the fast tier — critic doesn't need the main model
+        self._lm = get_lm("fast")
+        self.predict = dspy.Predict(CritiqueReply)
+
+    def forward(self, *, client_message: str, sentiment: str, is_flagged: bool, draft_reply: str):
+        with dspy.context(lm=self._lm):
+            out = self.predict(
+                client_message=client_message,
+                sentiment=sentiment,
+                is_flagged=is_flagged,
+                draft_reply=draft_reply,
+            )
+        out.score = max(0, min(100, int(out.score)))
+        return out
 
 
 class ChatOrchestrator:
