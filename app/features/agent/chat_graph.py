@@ -3,19 +3,23 @@
 Topology:
 
       START
-        │
+        |
+   retrieve_context     <-- pulls prior insights / case state into state
+        |
       triage
-       /│\\
-      / │ \\
-sentiment event risk     <-- parallel BSP step
-      \\ │ /
-       \\│/
-       decide            <-- no-op join, just here so we can route from it
-        │
-   ┌────┴────┐
-respond     END          <-- conditional based on triage + risk
-   │
-  END
+       /|\\
+      / | \\
+sentiment event risk    <-- parallel BSP step
+      \\ | /
+       \\|/
+       decide           <-- no-op join, conditional edge picks the next step
+        |
+   +----+----+
+respond     skip
+   |         |
+   +----+----+
+        v
+       END
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 
 from app.features.agent.state import ChatGraphState
+from app.features.chat.context import default_repo
 from app.features.chat.services import (
     EventModule,
     ResponseModule,
@@ -50,6 +55,23 @@ def _actions(triage: dict[str, Any]) -> list[str]:
     if triage["should_ignore"]:
         out.append("IGNORE")
     return out
+
+
+async def retrieve_context_node(state: ChatGraphState) -> dict[str, Any]:
+    """Look up prior insights / sentiment / case data before triage runs.
+
+    Empty by default; ContextRepo is the swap point for real persistence.
+    """
+    client_id = (state.get("client_info") or {}).get("client_id", "")
+    if not client_id:
+        return {"prior_insights": [], "open_case_data": {}, "last_sentiment": None, "last_risk": None}
+    ctx = await default_repo.fetch_for_client(client_id)
+    return {
+        "prior_insights": ctx.get("prior_insights", []),
+        "open_case_data": ctx.get("open_case_data", {}),
+        "last_sentiment": ctx.get("last_sentiment"),
+        "last_risk": ctx.get("last_risk"),
+    }
 
 
 def triage_node(state: ChatGraphState) -> dict[str, Any]:
@@ -97,7 +119,6 @@ def risk_node(state: ChatGraphState) -> dict[str, Any]:
 
 
 def decide_node(state: ChatGraphState) -> dict[str, Any]:
-    """No-op join. Conditional edge after this picks respond or END."""
     return {}
 
 
@@ -108,10 +129,8 @@ def route_after_decide(state: ChatGraphState) -> Literal["respond", "skip"]:
     if triage["should_ignore"]:
         return "skip"
     if not triage["should_respond"]:
-        # flag-only with no respond signal — skip auto reply
         return "skip"
     if triage["should_flag"] and risk["risk_update"] == "High":
-        # high-risk flagged: humans handle it, no auto reply
         return "skip"
     return "respond"
 
@@ -135,6 +154,7 @@ def skip_node(state: ChatGraphState) -> dict[str, Any]:
 
 def build_chat_graph():
     g = StateGraph(ChatGraphState)
+    g.add_node("retrieve_context", retrieve_context_node)
     g.add_node("triage", triage_node)
     g.add_node("sentiment", sentiment_node)
     g.add_node("event", event_node)
@@ -143,7 +163,8 @@ def build_chat_graph():
     g.add_node("respond", respond_node)
     g.add_node("skip", skip_node)
 
-    g.add_edge(START, "triage")
+    g.add_edge(START, "retrieve_context")
+    g.add_edge("retrieve_context", "triage")
     g.add_edge("triage", "sentiment")
     g.add_edge("triage", "event")
     g.add_edge("triage", "risk")

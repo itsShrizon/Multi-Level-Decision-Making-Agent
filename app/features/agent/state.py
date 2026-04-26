@@ -11,6 +11,12 @@ class ChatGraphState(TypedDict, total=False):
     history: list[dict[str, Any]]
     client_info: dict[str, Any]
 
+    # context fetched at the start of the run
+    prior_insights: list[str]
+    open_case_data: dict[str, Any]
+    last_sentiment: str | None
+    last_risk: str | None
+
     # outputs from the parallel branch nodes
     triage: dict[str, Any]
     sentiment: dict[str, Any]
